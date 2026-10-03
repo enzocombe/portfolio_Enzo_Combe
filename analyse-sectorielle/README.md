@@ -4,8 +4,7 @@ Projet d'analyse sectorielle réalisé en groupe de 3 (Licence Économie et Gest
 
 **Rapport : [Rapport_Analyse_Sectorielle_Produits_Phytosanitaires.pdf](Rapport_Analyse_Sectorielle_Produits_Phytosanitaires.pdf)**
 
-**Bibliographie : [Bibliographie_Rapport_Phytosanitaires.pdf]
-(Bibliographie_Rapport_Phytosanitaires.pdf)**
+**Bibliographie : [Bibliographie_Rapport_Phytosanitaires.pdf](Bibliographie_Rapport_Phytosanitaires.pdf)**
 
 ## Question
 Comment le secteur phytosanitaire français maintient-il sa performance face au durcissement réglementaire et aux attentes environnementales ?
