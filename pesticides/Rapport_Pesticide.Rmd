@@ -1,0 +1,922 @@
+---
+title: "Comment les pesticides influencent-ils le chiffre d'affaires des agriculteurs
+  ?"
+author: Valentin Lamy · Faresse Bouchemella · Rémi Moriceau · Enzo Combe — Groupe
+  C
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document: null
+  pdf_document: default
+---
+
+```{r packages, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(corrplot)
+library(kableExtra)
+library(scales)
+library(broom)
+library(gridExtra)
+library(lmtest)  
+library(sandwich)
+```
+
+# Importation des données
+
+## Importation Rica
+
+```{r importation_Rica}
+
+Rica <- read_delim( "data/Rica_France_micro_Donnees_ex2023.csv",
+  delim = ";",
+  locale = locale(
+    decimal_mark = ".",
+    grouping_mark = ",",
+    encoding = "UTF-8"
+  ),
+  escape_double = FALSE,
+  trim_ws = TRUE,
+  show_col_types = FALSE,
+  guess_max = 5000
+)
+
+cat("Dimensions :", nrow(Rica), "exploitations,", ncol(Rica), "variables\n")
+cat("Année      :", unique(Rica$MILEX), "\n")
+
+```
+
+## Importation Region
+
+```{r importation_region}
+
+region <- read_csv("data/region.csv",
+  locale = locale(encoding = "latin1"),
+  show_col_types = FALSE
+)
+
+colnames(region) <- c("ANNEE","NOM_REGION","CODE_REGION","NOM_DEPT",
+                       "CODE_DEPT","AMM","NOM_PRODUIT","EAJ",
+                       "BIOCONTROLE","UAB","ACHAT_ETRANGER","SUBSTANCE",
+                       "NUMERO_CAS","FONCTION","DANGER","QUANTITE")
+
+region <- region %>%
+  filter(ANNEE != "ANNEE") %>%
+  mutate(
+    ANNEE    = as.integer(ANNEE),
+    QUANTITE = as.numeric(QUANTITE),
+    FONCTION_clean = case_when(
+      str_detect(FONCTION, "(?i)herbicide")   ~ "Herbicides",
+      str_detect(FONCTION, "(?i)fongicide")   ~ "Fongicides",
+      str_detect(FONCTION, "(?i)insecticide") ~ "Insecticides",
+      TRUE ~ "Autres"
+    )
+  )
+
+cat("Dimensions :", nrow(region), "lignes,", ncol(region), "colonnes\n")
+cat("Période    :", min(region$ANNEE, na.rm=TRUE), "–",
+                    max(region$ANNEE, na.rm=TRUE), "\n")
+cat("Substances :", n_distinct(region$SUBSTANCE), "distinctes\n")
+cat("Régions    :", n_distinct(region$NOM_REGION), "\n")
+cat("Depts      :", n_distinct(region$NOM_DEPT), "\n")
+```
+
+# Introduction
+
+## Problématique
+
+Comment les dépenses en produits phytosanitaires influencent-elles le chiffre d'affaires des exploitations agricoles françaises ?
+
+## Équation idéale
+
+L'équation idéale, si toutes les données étaient disponibles, s'écrirait :
+
+$$
+\ln(CA_i) = \alpha_0
+  + \beta_1 \ln(Phytosanitaires_i)
+  + \beta_2 \ln(Surface_i)
+  + \beta_3 \ln(Travail_i)
+  + \beta_4 \ln(Engrais_i)
+  + \beta_5 \ln(Capital_i)
+  + \beta_6 Prix\_produits_i
+  + \sum_j \gamma_j \cdot Region_{ij}
+  + \varepsilon_i
+$$
+## Équation
+
+$$
+\ln(CA_i) = \alpha_0
+  + \beta_1 \ln(Phytosanitaires_i)
+  + \beta_2 \ln(Surface_i)
+  + \beta_3 \ln(Travail_i)
+  + \beta_4 \ln(Engrais_i)
+  + \beta_5 \ln(Subventions_i)
+  + \varepsilon_i
+$$
+
+## Intuitions sur les signes attendus :
+
+
+
+# Définition clé primaire  
+
+## Clé primaire RICA
+
+La clé primaire est **`IDNUM`** : identifiant numérique unique par exploitation.
+
+
+```{r rica_cle}
+cat("Nombre de lignes          :", nrow(Rica), "\n")
+cat("Valeurs uniques de IDNUM  :", n_distinct(Rica$IDNUM), "\n")
+cat("=> Clé primaire valide    :", nrow(Rica) == n_distinct(Rica$IDNUM), "\n")
+```
+
+# Dictionnaire des variables
+
+## RICA
+
+```{r dict_rica, echo=FALSE}
+dict_rica <- data.frame(
+  Variable = c("IDNUM","MILEX","REGIO","OTE64F",
+               "CHAFF","ACHPH","SUTOT","UTANS",
+               "CHRGTO","SUBEX","CHREN","CHRSE"),
+  Nature = c("Quant. discrète","Quant. discrète",
+             "Qual. nominale","Qual. nominale",
+             "Quant. continue","Quant. continue",
+             "Quant. continue","Quant. continue",
+             "Quant. continue","Quant. continue",
+             "Quant. continue","Quant. continue"),
+  Description = c(
+    "Identifiant unique de l'exploitation — CLÉ PRIMAIRE",
+    "Millésime de l'exercice comptable (2023)",
+    "Code région RICA — variable de fusion avec BNV-D",
+    "Orientation technico-économique (type de production)",
+    "Chiffre d'affaires total — VARIABLE DÉPENDANTE",
+    "Achats de produits phytosanitaires — VARIABLE D'INTÉRÊT",
+    "Surface agricole utilisée totale",
+    "Main-d'œuvre totale en Unités de Travail Annuel",
+    "Charges totales de l'exploitation",
+    "Subventions d'exploitation (aides PAC)",
+    "Charges en engrais et amendements minéraux",
+    "Charges en semences et plants"
+  ),
+  Unite = c("—","année","code","code","€","€","ha","UTH","€","€","€","€")
+)
+
+kable(dict_rica, caption = "Dictionnaire des variables RICA retenues") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), font_size = 12) %>%
+  row_spec(1, bold = TRUE, background = "#cfe2ff") %>%
+  row_spec(5, bold = TRUE, background = "#d4edda") %>%
+  row_spec(6, bold = TRUE, background = "#fff3cd") %>%
+  row_spec(3, italic = TRUE, background = "#e8f4f8")
+```
+
+## Region
+
+```{r dict_bnvd, echo=FALSE}
+dict_bnvd <- data.frame(
+  Variable = c("ANNEE","NOM_REGION","CODE_REGION","NOM_DEPT","CODE_DEPT",
+               "AMM","NOM_PRODUIT","EAJ","BIOCONTROLE","UAB",
+               "ACHAT_ETRANGER","SUBSTANCE","NUMERO_CAS",
+               "FONCTION","DANGER","QUANTITE"),
+  Nature = c("Quant. discrète","Qual. nominale","Qual. nominale",
+             "Qual. nominale","Qual. nominale","Qual. nominale",
+             "Qual. nominale","Qual. binaire","Qual. binaire",
+             "Qual. binaire","Qual. binaire","Qual. nominale",
+             "Qual. nominale","Qual. nominale","Qual. nominale",
+             "Quant. continue"),
+  Description = c(
+    "Année de vente — PARTIE CLÉ COMPOSITE",
+    "Nom de la région de l'acheteur",
+    "Code INSEE région — variable de fusion avec RICA",
+    "Nom du département","Code du département — PARTIE CLÉ",
+    "N° AMM — PARTIE CLÉ","Nom commercial du produit",
+    "Substance classée Endocrinien Avéré/suspecté",
+    "Substance de biocontrôle","Autorisée en agriculture biologique",
+    "Achat à l'étranger","Substance active — PARTIE CLÉ",
+    "Numéro CAS","Herbicide / Fongicide / Insecticide / Autres",
+    "Niveau de danger","Quantité vendue — VARIABLE PRINCIPALE"
+  ),
+  Unite = c("année","—","code","—","code","—","—",
+            "oui/non","oui/non","uab/non","oui/non",
+            "—","—","—","—","kg")
+)
+
+kable(dict_bnvd, caption = "Dictionnaire des variables BNV-D") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), font_size = 11) %>%
+  row_spec(c(1,3,5,6,12), bold=TRUE, background="#cfe2ff") %>%
+  row_spec(16, bold=TRUE, background="#fff3cd")
+```
+
+# Fusion des tables
+
+Variable instrumentale : pour Rica : REGIO et pour Region : CODE_REGION	
+
+le RICA utilise l'ancienne numérotation régionale (ex : 44 = Pays de la Loire), la BNV-D les codes INSEE actuels (ex : 44 = Grand Est). La table de correspondance ci-dessous est indispensable pour que la fusion ce fasse bien.
+
+```{r prep_rica}
+Rica_clean <- Rica %>%
+  filter(CHAFF > 0, ACHPH >= 0, SUTOT > 0) %>%
+  mutate(
+    UTANS      = as.numeric(UTANS),
+    REGIO_f    = as.factor(REGIO),
+    log_CHAFF  = log(CHAFF),
+    log_ACHPH  = log1p(ACHPH),
+    log_SUTOT  = log(SUTOT),
+    log_UTANS  = log1p(UTANS),
+    log_SUBEX  = log1p(SUBEX),
+    log_CHREN  = log1p(CHREN),
+    phyto_user = as.integer(ACHPH > 0)
+  )
+
+cat("Exploitations retenues          :", nrow(Rica_clean), "\n")
+cat("Utilisant des phytosanitaires   :", sum(Rica_clean$phyto_user),
+    paste0("(", round(mean(Rica_clean$phyto_user)*100, 1), " %)"), "\n")
+```
+
+```{r region_agregation}
+bnvd_reg_2023 <- region %>%
+  filter(ANNEE == 2023) %>%
+  group_by(CODE_REGION) %>%
+  summarise(total_quantite_kg = sum(QUANTITE, na.rm = TRUE))
+
+cat("Régions dans BNV-D 2023 :", nrow(bnvd_reg_2023), "\n")
+```
+
+```{r correspondance des codes région}
+correspondance <- data.frame(
+  REGIO = c(11, 24, 27, 28, 44, 52, 53, 75, 76, 84, 93, 94),
+  CODE_REGION = c("11", "24", "27", "28", "44", "52", "53", "75", "76", "84", "93", "94")
+)
+```
+
+## Fusion
+
+```{r fusion}
+Rica_merged <- Rica_clean %>%
+  left_join(correspondance, by = "REGIO") %>%
+  left_join(bnvd_reg_2023, by = "CODE_REGION") %>%
+  mutate(
+    ca_par_ha        = CHAFF / SUTOT,
+    phyto_par_ha     = ACHPH / SUTOT,
+    log_ca_ha        = log(ca_par_ha),
+    log_phyto_ha     = log1p(phyto_par_ha),
+    log_pression_reg = log1p(total_quantite_kg)
+  )
+
+cat("Exploitations avec pression régionale BNV-D :",
+    sum(!is.na(Rica_merged$total_quantite_kg)), "\n")
+cat("Taux de couverture :",
+    round(mean(!is.na(Rica_merged$total_quantite_kg))*100, 1), "%\n")
+```
+
+# Statistiques descriptives après fusion
+
+```{r stats_rica}
+vars_desc   <- c("CHAFF","ACHPH","SUTOT","UTANS","CHRGTO","SUBEX","CHREN")
+labels_desc <- c("CA total (€)","Phytosanitaires (€)","SAU (ha)",
+                 "Travail (UTH)","Charges totales (€)",
+                 "Subventions (€)","Engrais (€)")
+
+Rica_clean %>%
+  select(all_of(vars_desc)) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Val") %>%
+  group_by(Variable) %>%
+  summarise(N         = n(),
+            Moyenne   = round(mean(Val, na.rm=TRUE), 0),
+            `Éc.-type` = round(sd(Val, na.rm=TRUE), 0),
+            Min       = round(min(Val, na.rm=TRUE), 0),
+            Q25       = round(quantile(Val, .25, na.rm=TRUE), 0),
+            Médiane   = round(median(Val, na.rm=TRUE), 0),
+            Q75       = round(quantile(Val, .75, na.rm=TRUE), 0),
+            Max       = round(max(Val, na.rm=TRUE), 0)) %>%
+  mutate(Libellé = labels_desc[match(Variable, vars_desc)]) %>%
+  select(Variable, Libellé, everything()) %>%
+  kable(caption = "Tableau — Statistiques descriptives RICA 2023",
+        format.args = list(big.mark = " ")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), font_size = 11) %>%
+  row_spec(c(1,2), bold = TRUE, background = "#fff3cd")
+```
+
+# Tests statistiques
+
+##  Création du modèle
+
+```{r creation_modele}
+Rica_ols <- Rica_merged %>% filter(ACHPH > 0, !is.na(log_pression_reg))
+
+
+modele_test <- lm(log_CHAFF ~ log_ACHPH + log_SUTOT + log_UTANS +
+                    log_SUBEX + log_CHREN, data = Rica_ols)
+
+```
+
+
+## Significativité individuelle
+
+```{r significativité individuelle}
+tidy(modele_test) %>%
+  mutate(
+    Variable = recode(term,
+      "(Intercept)" = "Constante",
+      "log_ACHPH"   = "log(ACHPH) — phytosanitaires",
+      "log_SUTOT"   = "log(SUTOT) — surface SAU",
+      "log_UTANS"   = "log(UTANS) — travail UTH",
+      "log_SUBEX"   = "log(SUBEX+1) — subventions",
+      "log_CHREN"   = "log(CHREN+1) — engrais"),
+    Significativité = case_when(
+      p.value < 0.001 ~ "*** (p < 0.001)",
+      p.value < 0.01  ~ "**  (p < 0.01)",
+      p.value < 0.05  ~ "*   (p < 0.05)",
+      p.value < 0.1   ~ ".   (p < 0.10)",
+      TRUE            ~ "non significatif"
+    ),
+    across(c(estimate, std.error, statistic), ~round(., 4)),
+    p.value = round(p.value, 4)
+  ) %>%
+  select(Variable, estimate, std.error, statistic, p.value, Significativité) %>%
+  rename(Coefficient = estimate, `Err. std.` = std.error,
+         `t observé` = statistic, `p-value` = p.value) %>%
+  kable(caption = paste0(
+    "Test de significativité individuelle (H₀ : βₖ = 0) | ",
+    "Seuil de rejet : α = 5 %")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), font_size = 11) %>%
+  row_spec(which(tidy(modele_test)$p.value < 0.05) , 
+           bold = TRUE, background = "#d4edda") %>%
+  row_spec(which(tidy(modele_test)$p.value >= 0.05),
+           background = "#fde8e8")
+```
+
+
+## Test de Breusch-Pagan (hétéroscédasticité)
+
+```{r test_bp}
+
+bp_test <- bptest(modele_test)
+print(bp_test)
+
+cat("\nConclusion : p-value =", round(bp_test$p.value, 4), "\n")
+if (bp_test$p.value < 0.05) {
+  cat("=> Hétéroscédasticité détectée (p < 0.05). Des erreurs robustes sont recommandées.\n")
+} else {
+  cat("=> Pas d'hétéroscédasticité significative (p >= 0.05).\n")
+}
+```
+
+## Test de White (forme générale)
+
+```{r test_white}
+white_test <- bptest(modele_test, ~ fitted(modele_test) + I(fitted(modele_test)^2))
+print(white_test)
+```
+
+# Hétéroscédasticité : correction par erreurs robustes
+
+```{r hetero_correction}
+# Erreurs robustes de White (HC3)
+coeftest_robust <- coeftest(modele_test, vcov = vcovHC(modele_test, type = "HC3"))
+
+# Comparaison MCO classiques vs robustes
+tidy(modele_test) %>%
+  select(term, estimate, std.error) %>%
+  rename(Variable = term,
+         Coeff = estimate,
+         `SE classique` = std.error) %>%
+  mutate(
+    `SE robuste (HC3)` = sqrt(diag(vcovHC(modele_test, type = "HC3"))),
+    `Ratio SE` = round(`SE robuste (HC3)` / `SE classique`, 3),
+    Variable = recode(Variable,
+      "(Intercept)" = "Constante",
+      "log_ACHPH"   = "log(ACHPH)",
+      "log_SUTOT"   = "log(SUTOT)",
+      "log_UTANS"   = "log(UTANS)",
+      "log_SUBEX"   = "log(SUBEX+1)",
+      "log_CHREN"   = "log(CHREN+1)")
+  ) %>%
+  mutate(across(c(Coeff, `SE classique`, `SE robuste (HC3)`), ~round(., 4))) %>%
+  kable(caption = "Tableau — Comparaison des erreurs standards : MCO vs robustes (HC3)") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), font_size = 11) %>%
+  row_spec(2, bold = TRUE, background = "#fff3cd")
+```
+
+```{r plot_residuals, fig.cap="Figure — Diagnostic d'hétéroscédasticité : résidus vs valeurs ajustées"}
+tibble(
+  fitted    = fitted(modele_test),
+  residuals = residuals(modele_test)
+) %>%
+  ggplot(aes(x = fitted, y = residuals)) +
+  geom_point(alpha = .15, size = 1, color = "#546E7A") +
+  geom_hline(yintercept = 0, color = "red", linewidth = 1) +
+  geom_smooth(method = "loess", color = "#1E88E5", se = FALSE, linewidth = 1) +
+  labs(x = "Valeurs ajustées (log CA)",
+       y = "Résidus",
+       title = "Résidus vs valeurs ajustées",
+       subtitle = "Un entonnoir indique de l'hétéroscédasticité") +
+  theme_minimal()
+```
+
+# Graphiques exploratoires
+
+## Distributions des variables clés
+
+```{r fig_distrib, fig.cap="Figure — Distributions de CHAFF et ACHPH (log)"}
+p1 <- ggplot(Rica_clean, aes(x = CHAFF)) +
+  geom_histogram(bins=60, fill="#4CAF50", color="white", alpha=.85) +
+  geom_vline(xintercept=median(Rica_clean$CHAFF), color="red",
+               linetype="dashed", linewidth=1) +
+  scale_x_continuous(labels=label_comma(big.mark=" "), limits = c(20000, 2000000)) +
+  labs(x="CA (€)", y="Fréquence (nb d'exploitations)", title="Distribution du CA",
+         subtitle=paste0("Médiane : ",
+           format(round(median(Rica_clean$CHAFF)), big.mark=" "), " €")) +
+  theme_minimal()
+
+p2 <- ggplot(filter(Rica_clean, ACHPH > 0), aes(x = log_ACHPH)) +
+  geom_histogram(bins=50, fill="#2196F3", color="white", alpha=.85) +
+  labs(x="log(phytosanitaire+1)", y="Fréquence (nb d'exploitations)", title="Distribution log(Phytosanitaire)",
+         subtitle=paste0("Médiane ACHPH : ",
+           format(round(median(Rica_clean$ACHPH)), big.mark=" "), " €")) +
+  theme_minimal()
+
+grid.arrange(p1, p2, ncol=2)
+
+```
+CA médian = 217 786 euros, Le prix médian de l'utilisation des produits phytosanitaire = 6 122 euros, l'utilisation de ses derniers representent environ 3% du chiffre d'affaire des exploitations. C'est une charge importante.
+
+
+## Relation phytosanitaires / CA (log-log)
+
+```{r fig_scatter3, fig.cap="Figure — Relation ACHPH / CHAFF (log-log)"}
+Rica_clean %>% filter(ACHPH > 0) %>%
+  ggplot(aes(x=log_ACHPH, y=log_CHAFF)) +
+  geom_point(alpha=.15, size=1.2, color="#546E7A") +
+  geom_smooth(method="lm",    color="#E53935", linewidth=1.3, se=TRUE) +
+  geom_smooth(method="loess", color="#1E88E5", linewidth=1,
+              linetype="dashed", se=FALSE) +
+  labs(x="log(Achats phytosanitaires + 1)", y="log(Chiffre d'affaires)",
+       title="Relation entre achats phytosanitaires et CA (log-log)",
+       subtitle=paste0("R² = ",
+         round(cor(filter(Rica_clean,ACHPH>0)$log_ACHPH,
+                   filter(Rica_clean,ACHPH>0)$log_CHAFF)^2, 2),
+         " | Rouge = OLS | Bleu = LOESS"),
+       caption="Source : RICA France 2023") +
+  theme_minimal()
+```
+
+## Relation phytosanitaires / CA (log-log) au carré
+
+```{r fig_scatter2, fig.cap="Figure — Relation ACHPH / CHAFF (log-log)"}
+Rica_clean %>% filter(ACHPH > 0) %>%
+  ggplot(aes(x=log_ACHPH^2, y=log_CHAFF^2)) +
+  geom_point(alpha=.15, size=1.2, color="#546E7A") +
+  geom_smooth(method="lm",    color="#E53935", linewidth=1.3, se=TRUE) +
+  geom_smooth(method="loess", color="#1E88E5", linewidth=1,
+              linetype="dashed", se=FALSE) +
+  labs(x="log(Achats phytosanitaires + 1)", y="log(Chiffre d'affaires)",
+       title="Relation entre achats phytosanitaires et CA (log-log)",
+       subtitle=paste0("R² = ",
+         round(cor(filter(Rica_clean,ACHPH>0)$log_ACHPH,
+                   filter(Rica_clean,ACHPH>0)$log_CHAFF)^2, 2),
+         " | Rouge = OLS | Bleu = LOESS"),
+       caption="Source : RICA France 2023") +
+  theme_minimal()
+```
+
+## Relation normalisée par hectare (après fusion)
+
+```{r fig_ha, fig.cap="Figure — Intensité phyto vs rendement économique (€/ha)"}
+Rica_merged %>% filter(ACHPH > 0) %>%
+  ggplot(aes(x = log_phyto_ha, y = log_ca_ha)) +
+  geom_point(alpha = 0.2, color = "darkgreen") +
+  geom_smooth(method = "lm", color = "red", linewidth = 1.2) +
+  geom_smooth(method = "loess", color = "#1E88E5", linetype = "dashed",
+              linewidth = 1, se = FALSE) +
+labs(
+  title = "Intensité phytosanitaire et rendement économique",
+  subtitle = paste0(
+    "R² = ", 
+    round(cor(filter(Rica_merged, ACHPH > 0)$log_phyto_ha, 
+              filter(Rica_merged, ACHPH > 0)$log_ca_ha)^2, 2),
+    " (Soit ", 
+    round(cor(filter(Rica_merged, ACHPH > 0)$log_phyto_ha, 
+              filter(Rica_merged, ACHPH > 0)$log_ca_ha)^2 * 100, 0), 
+    "% de la variance du rendement expliquée par les pesticides)"
+  ),
+  x = "log(Phyto par hectare + 1)",
+  y = "log(CA par hectare)",
+  caption = "Source : RICA × BNV-D"
+) +
+  theme_minimal()
+```
+
+## Matrice de corrélation
+
+```{r fig_corr, fig.cap="Figure — Matrice de corrélation (variables log)"}
+vars_c <- c("log_CHAFF","log_ACHPH","log_SUTOT","log_UTANS","log_SUBEX","log_CHREN")
+labs_c <- c("CA","Phyto","Surface","Travail","Subventions","Engrais")
+cm <- cor(Rica_clean[, vars_c], use="pairwise.complete.obs")
+rownames(cm) <- colnames(cm) <- labs_c
+corrplot(cm, method="color", type="upper", tl.cex=.9, tl.col="black",
+         addCoef.col="black", number.cex=.8,
+         col=colorRampPalette(c("#E53935","white","#1E88E5"))(200),
+         title="Corrélations entre variables clés (RICA 2023)", mar=c(0,0,2,0))
+```
+
+## Comparaison graphique des modèles (échantillon commun)
+
+```{r}
+Rica_commun <- Rica_merged %>%
+  filter(ACHPH > 0, !is.na(log_pression_reg)) %>%
+  mutate(log_ACHPH2 = log_ACHPH^2)
+
+m1_c <- lm(log_CHAFF ~ log_ACHPH + log_SUTOT + log_UTANS +
+             log_SUBEX + log_CHREN,
+           data = Rica_commun)
+
+m2_c <- lm(log_CHAFF ~ log_ACHPH + log_SUTOT + log_UTANS +
+             log_SUBEX + log_CHREN + REGIO_f,
+           data = Rica_commun)
+
+m3_c <- lm(log_ca_ha ~ log_phyto_ha + log_UTANS + log_SUBEX +
+             log_CHREN + CODE_REGION,
+           data = Rica_commun)
+
+# Modèle 4 : terme quadratique log(ACHPH)² — relation non-linéaire
+m4_c <- lm(log_CHAFF ~ log_ACHPH + log_ACHPH2 + log_SUTOT +
+             log_UTANS + log_SUBEX + log_CHREN + REGIO_f,
+           data = Rica_commun)
+```
+
+
+```{r fig_comparaison_modeles, fig.cap="Figure — Relation log(ACHPH) → log(CA) : comparaison des 4 modèles sur échantillon commun"}
+Rica_commun %>%
+  mutate(
+    fit_m1 = fitted(m1_c),
+    fit_m2 = fitted(m2_c),
+    fit_m4 = fitted(m4_c)
+  ) %>%
+  ggplot(aes(x = log_ACHPH)) +
+  geom_point(aes(y = log_CHAFF), alpha = 0.08, size = 0.8, color = "gray50") +
+  geom_smooth(aes(y = fit_m1, color = "M1 — sans région"),
+              method = "lm", se = FALSE, linewidth = 0.9) +
+  geom_smooth(aes(y = fit_m2, color = "M2 — avec région"),
+              method = "lm", se = FALSE, linewidth = 0.9) +
+  geom_smooth(aes(y = fit_m4, color = "M4 — quadratique"),
+              method = "lm", formula = y ~ x + I(x^2), se = TRUE, linewidth = 0.9) +
+  scale_color_manual(values = c(
+    "M1 — sans région" = "#378ADD",
+    "M2 — avec région" = "#1D9E75",
+    "M4 — quadratique" = "#D85A30"
+  )) +
+  labs(
+    title   = "Relation log(ACHPH) → log(CA) : comparaison des modèles",
+    x       = "log(Achats phytosanitaires)",
+    y       = "log(Chiffre d'affaires)",
+    color   = NULL,
+    caption = paste0("Échantillon commun, n = ", nrow(Rica_commun))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+## Évolution des ventes (2013–2023)
+
+```{r fig_bnvd_trend, fig.cap="Figure — Évolution des ventes nationales"}
+region %>%
+  group_by(ANNEE) %>%
+  summarise(tonnes = sum(QUANTITE, na.rm=TRUE)/1000) %>%
+  ggplot(aes(x=ANNEE, y=tonnes)) +
+  geom_col(fill="#78909C", alpha=.85, color="white", width=.7) +
+  geom_line(color="#E53935", linewidth=1.4) +
+  geom_point(color="#E53935", size=2.5) +
+  scale_x_continuous(breaks=2013:2023) +
+  labs(x="Année", y="Quantité vendue (tonnes)",
+       title="Évolution des ventes de substances phytosanitaires en France",
+       caption="Source : region") +
+  theme_minimal()
+```
+
+## Par type de substance et par région (2023)
+
+```{r fig_region, fig.cap="Figure — Substances et régions"}
+p_fonc <- region %>%
+  group_by(FONCTION_clean) %>%
+  summarise(total = sum(QUANTITE, na.rm=TRUE)/1000) %>%
+  ggplot(aes(x=reorder(FONCTION_clean, total), y=total, fill=FONCTION_clean)) +
+  geom_col(show.legend=FALSE, alpha=.85) +
+  coord_flip() +
+  scale_fill_manual(values=c("#E53935","#1E88E5","#43A047","#FB8C00")) +
+  labs(x=NULL, y="Tonnes (2013–2023)", title="Par type de substance") +
+  theme_minimal()
+
+p_reg <- region %>%
+  filter(ANNEE==2023, NOM_REGION != "INDETERMINE") %>%
+  group_by(NOM_REGION) %>%
+  summarise(total = sum(QUANTITE, na.rm=TRUE)/1000) %>%
+  ggplot(aes(x=reorder(NOM_REGION, total), y=total)) +
+  geom_col(fill="#2c6e49", alpha=.8) +
+  coord_flip() +
+  labs(x=NULL, y="Tonnes (2023)", title="Par région en 2023") +
+  theme_minimal()
+
+grid.arrange(p_fonc, p_reg, ncol=2)
+```
+
+
+# Régression linéaire (MCO)
+
+## Équation opérationnelle a estimée
+
+$$
+\ln(CHAFF_i) = \alpha_0
+  + \underbrace{\beta_1 \ln(ACHPH_i)}_{\text{phytosanitaires}}
+  + \underbrace{\beta_2 \ln(SUTOT_i)}_{\text{surface}}
+  + \underbrace{\beta_3 \ln(UTANS_i)}_{\text{travail}}
+  + \underbrace{\beta_4 \ln(SUBEX_i+1)}_{\text{subventions}}
+  + \underbrace{\beta_5 \ln(CHREN_i+1)}_{\text{engrais}}
+  + \underbrace{\sum_j \gamma_j \cdot \mathbf{1}[REGIO_i = j]}_{\text{effets régionaux}}
+  + \varepsilon_i
+$$
+
+> **Note :** `REGIO` est traitée comme un **facteur** pour générer des indicatrices par région. L'utiliser comme variable numérique continue serait une erreur économétrique.
+
+## Estimation
+
+```{r regression}
+Rica_ols <- Rica_clean %>% filter(ACHPH > 0)
+
+# Modèle 1 : sans effets région
+modele_1 <- lm(log_CHAFF ~ log_ACHPH + log_SUTOT + log_UTANS +
+                 log_SUBEX + log_CHREN, data = Rica_ols)
+
+# Modèle 2 : avec effets région
+modele_2 <- lm(log_CHAFF ~ log_ACHPH + log_SUTOT + log_UTANS +
+                 log_SUBEX + log_CHREN + REGIO_f, data = Rica_ols)
+
+# Modèle 3 : normalisé par hectare + pression régionale (données fusionnées)
+Rica_ols_merged <- Rica_merged %>% filter(ACHPH > 0, !is.na(log_pression_reg))
+
+modele_3 <- lm(log_ca_ha ~ log_phyto_ha + log_UTANS + log_SUBEX +
+                 log_CHREN + CODE_REGION, data = Rica_ols_merged)
+
+# ── Échantillon commun : mêmes observations pour les 3 modèles (comparaison valide)
+Rica_commun <- Rica_merged %>%
+  filter(ACHPH > 0, !is.na(log_pression_reg)) %>%
+  mutate(log_ACHPH2 = log_ACHPH^2)
+
+m1_c <- lm(log_CHAFF ~ log_ACHPH + log_SUTOT + log_UTANS +
+             log_SUBEX + log_CHREN,
+           data = Rica_commun)
+
+m2_c <- lm(log_CHAFF ~ log_ACHPH + log_SUTOT + log_UTANS +
+             log_SUBEX + log_CHREN + REGIO_f,
+           data = Rica_commun)
+
+m3_c <- lm(log_ca_ha ~ log_phyto_ha + log_UTANS + log_SUBEX +
+             log_CHREN + CODE_REGION,
+           data = Rica_commun)
+
+# Modèle 4 : terme quadratique log(ACHPH)² — relation non-linéaire
+m4_c <- lm(log_CHAFF ~ log_ACHPH + log_ACHPH2 + log_SUTOT +
+             log_UTANS + log_SUBEX + log_CHREN + REGIO_f,
+           data = Rica_commun)
+
+cat("N commun :", nrow(Rica_commun), "\n")
+```
+
+## Résultats — Modèle 2 (avec effets fixes régionaux)
+
+```{r resultats_m2}
+tidy(modele_2) %>%
+  # On retire l'affichage des 80 régions pour la lisibilité
+  filter(!str_detect(term, "REGIO")) %>% 
+  mutate(
+    term = recode(term,
+      "(Intercept)" = "Constante (Référence)",
+      "log_ACHPH"   = "log(ACHPH) — Phytosanitaires",
+      "log_SUTOT"   = "log(SUTOT) — Surface (SAU)",
+      "log_UTANS"   = "log(UTANS) — Travail (UTH)",
+      "log_SUBEX"   = "log(SUBEX+1) — Subventions",
+      "log_CHREN"   = "log(CHREN+1) — Engrais"),
+    
+    Sig. = case_when(
+      p.value < .001 ~ "***",
+      p.value < .01  ~ "**",
+      p.value < .05  ~ "*",
+      TRUE ~ ""
+    ),
+    across(c(estimate, std.error, statistic), ~round(., 4)),
+    p.value = round(p.value, 4)
+  ) %>%
+  rename(Variable=term, Coefficient=estimate, 
+         `Err. std.`=std.error, t=statistic, `p-value`=p.value) %>%
+  kable(caption = paste0(
+    "Tableau — Résultats du Modèle avec Effets Fixes Régionaux | N = ", 
+    nrow(Rica_ols), " | R² = ", round(summary(modele_2)$r.squared, 3))) %>%
+  kable_styling(bootstrap_options=c("striped","hover"))
+```
+
+```{r}
+# On utilise tidy pour récupérer les résultats du modèle 3
+tidy(m3_c) %>%
+  # On cache les 80 régions pour que le tableau reste lisible
+  filter(!str_detect(term, "REGIO")) %>% 
+  mutate(
+    term = recode(term,
+      "(Intercept)"      = "Constante (Référence)",
+      "log_ACHPH"        = "log(ACHPH) — Effet linéaire",
+      "I(log_ACHPH^2)"   = "log(ACHPH)² — Effet quadratique (Courbe)",
+      "log_SUTOT"        = "log(SUTOT) — Surface (SAU)",
+      "log_UTANS"        = "log(UTANS) — Travail (UTH)",
+      "log_SUBEX"        = "log(SUBEX+1) — Subventions",
+      "log_CHREN"        = "log(CHREN+1) — Engrais"),
+    
+    # Calcul des étoiles de significativité
+    Sig. = case_when(
+      p.value < .001 ~ "***",
+      p.value < .01  ~ "**",
+      p.value < .05  ~ "*",
+      TRUE ~ ""
+    ),
+    # Arrondi des coefficients et p-values
+    across(c(estimate, std.error, statistic), ~round(., 4)),
+    p.value = round(p.value, 4)
+  ) %>%
+  rename(Variable=term, Coefficient=estimate, 
+         `Err. std.`=std.error, t=statistic, `p-value`=p.value) %>%
+  kable(caption = paste0(
+    "Tableau — MCO Modèle 3 (CA par hectare et effets régionaux) | N = ", 
+    nrow(Rica_commun), " | R² = ", round(summary(m3_c)$r.squared, 3))) %>%
+  kable_styling(bootstrap_options=c("striped","hover")) %>%
+  # On surligne la ligne des pesticides
+  row_spec(2, bold=TRUE, background="#e3f2fd")
+```
+
+
+```{r resultats_m2_2}
+tidy(modele_1) %>%
+  mutate(
+    term = recode(term,
+      "(Intercept)" = "Constante",
+      "log_ACHPH"   = "log(ACHPH) — phytosanitaires",
+      "log_SUTOT"   = "log(SUTOT) — surface SAU",
+      "log_UTANS"   = "log(UTANS) — travail UTH",
+      "log_SUBEX"   = "log(SUBEX+1) — subventions",
+      "log_CHREN"   = "log(CHREN+1) — engrais",
+      "log_REGIO"   = "log(REGIO_f) — region"),
+    
+    Sig. = case_when(p.value<.001~"***", p.value<.01~"**",
+                     p.value<.05~"*", TRUE~""),
+    across(c(estimate, std.error, statistic), ~round(., 4)),
+    p.value = round(p.value, 4)
+  ) %>%
+  rename(Variable=term, Coefficient=estimate,
+         `Err. std.`=std.error, t=statistic, `p-value`=p.value) %>%
+  kable(caption=paste0(
+    "Tableau — MCO Modèle 1 (sans effets région) | N = ",
+    nrow(Rica_ols), " | R² = ", round(summary(modele_1)$r.squared, 3),
+    " | *** p<0.001")) %>%
+  kable_styling(bootstrap_options=c("striped","hover")) %>%
+  row_spec(2, bold=TRUE, background="#fff3cd")
+```
+
+## Tableau de synthèse — Comparaison des 4 modèles (échantillon commun)
+
+Les modèles 1, 2 et 3 sont ici ré-estimés sur le **même échantillon** (`Rica_commun`, n = exploitations fusionnées avec ACHPH > 0) afin de rendre la comparaison des R² valide. Le modèle 4 introduit un terme quadratique pour tester une relation non-linéaire.
+
+```{r synthese_modeles}
+# Seuil de maximisation du CA (si β₂ < 0 → rendements décroissants)
+beta1 <- coef(m4_c)["log_ACHPH"]
+beta2 <- coef(m4_c)["log_ACHPH2"]
+if (!is.na(beta2) && beta2 < 0) {
+  seuil_log   <- -beta1 / (2 * beta2)
+  seuil_euros <- exp(seuil_log)
+  cat("Seuil de maximisation du CA :", round(seuil_euros), "€ d'achats phyto\n")
+}
+
+data.frame(
+  Modèle    = c("M1 — sans région",
+                "M2 — avec effets région",
+                "M3 — €/ha + région",
+                "M4 — quadratique"),
+  N         = rep(nrow(Rica_commun), 4),
+  R2        = round(c(summary(m1_c)$r.squared,
+                      summary(m2_c)$r.squared,
+                      summary(m3_c)$r.squared,
+                      summary(m4_c)$r.squared), 4),
+  R2_adj    = round(c(summary(m1_c)$adj.r.squared,
+                      summary(m2_c)$adj.r.squared,
+                      summary(m3_c)$adj.r.squared,
+                      summary(m4_c)$adj.r.squared), 4),
+  AIC       = round(c(AIC(m1_c), AIC(m2_c), AIC(m3_c), AIC(m4_c)), 1),
+  beta_ACHPH = round(c(coef(m1_c)["log_ACHPH"],
+                       coef(m2_c)["log_ACHPH"],
+                       NA,
+                       coef(m4_c)["log_ACHPH"]), 4)
+) %>%
+  kable(caption = paste0("Tableau de synthèse — 4 modèles sur échantillon commun | N = ",
+                         nrow(Rica_commun)),
+        col.names = c("Modèle", "N", "R²", "R² ajusté", "AIC", "β log(ACHPH)")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  row_spec(which.max(c(summary(m1_c)$adj.r.squared,
+                       summary(m2_c)$adj.r.squared,
+                       summary(m3_c)$adj.r.squared,
+                       summary(m4_c)$adj.r.squared)),
+           bold = TRUE, background = "#d4edda")
+```
+
+## Interprétation des paramètres
+
+**β₁ = `r round(coef(modele_1)["log_ACHPH"], 3)`** : une hausse de 1 % des achats phytosanitaires est associée, *toutes choses égales*, à +**`r round(coef(modele_1)["log_ACHPH"], 2)` %** de CA (élasticité). Confirme l'hypothèse de complémentarité. L'élasticité < 1 indique des rendements décroissants.
+
+**β₂ = `r round(coef(modele_1)["log_SUTOT"], 3)`** : effet surface positif modéré, reflétant l'hétérogénéité des systèmes de production.
+
+**β₃ = `r round(coef(modele_1)["log_UTANS"], 3)`** : facteur le plus élastique (+`r round(coef(modele_1)["log_UTANS"], 2)` % de CA pour +1 % de travail).
+
+**β₄ = `r round(coef(modele_1)["log_SUBEX"], 3)`** : effet légèrement négatif — les aides PAC compensent des exploitations moins productives sans stimuler le CA marchand.
+
+**β₅ = `r round(coef(modele_1)["log_CHREN"], 3)`** : complémentarité engrais–rendement confirmée.
+
+## Variables manquantes et proxies
+
+```{r var_manquantes, echo=FALSE}
+data.frame(
+  `Variable idéale` = c("Prix des produits","Rendements physiques",
+                         "Données météo","Pression parasitaire",
+                         "Agriculture biologique","Capital équipements"),
+  `Proxy utilisé` = c("—","CHAFF (proxy imparfait)","Effets fixes région",
+                       "Volumes BNV-D régionaux (après fusion)","—","—"),
+  `Source si disponible` = c("FranceAgriMer","Teruti-Lucas","Météo-France",
+                               "BNV-D (déjà intégrée)","Agence Bio",
+                               "RICA investissements")
+) %>%
+  kable(caption="Tableau — Variables manquantes, proxies et sources",
+        col.names=c("Variable idéale","Proxy utilisé","Source si disponible")) %>%
+  kable_styling(bootstrap_options=c("striped","hover"), font_size=11) %>%
+  row_spec(4, bold=TRUE, background="#d4edda")
+```
+
+
+## Limites du modèle
+
+- **Hétéroscédasticité** : détectée par le test de Breusch-Pagan → erreurs robustes de White (`vcovHC`, HC3) calculées et comparées aux erreurs classiques (tableau de comparaison ci-dessus).
+- **Variables omises** : prix des produits agricoles, météo, rendements physiques expliquent la variance résiduelle (R² = `r round(summary(modele_1)$r.squared, 2)`).
+
+### Biais de sélection (sur n = `r nrow(Rica_commun)`)
+
+L'échantillon commun exclut les exploitations sans achats phytosanitaires (ACHPH = 0), probablement des exploitations bio ou très extensives. Le tableau ci-dessous compare les caractéristiques des exploitations incluses et exclues.
+
+```{r biais_selection}
+Rica_clean %>%
+  mutate(dans_commun = IDNUM %in% Rica_commun$IDNUM) %>%
+  group_by(dans_commun) %>%
+  summarise(
+    n          = n(),
+    CA_median  = round(median(CHAFF, na.rm = TRUE), 0),
+    SAU_median = round(median(SUTOT, na.rm = TRUE), 1),
+    UTH_median = round(median(UTANS, na.rm = TRUE), 2)
+  ) %>%
+  mutate(Groupe = ifelse(dans_commun, "Dans l'échantillon commun", "Exclu")) %>%
+  select(Groupe, n, CA_median, SAU_median, UTH_median) %>%
+  kable(caption = "Biais de sélection — Comparaison échantillon commun vs exclus",
+        col.names = c("Groupe", "N", "CA médian (€)", "SAU médiane (ha)", "UTH médian"),
+        format.args = list(big.mark = " ")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), font_size = 11)
+```
+
+Un modèle de Heckman permettrait de corriger ce biais en modélisant conjointement la décision d'utiliser des pesticides et le niveau de CA.
+
+### Endogénéité de ACHPH
+
+ACHPH est probablement endogène : les exploitations aux cultures plus risquées achètent davantage de phytos *et* réalisent un CA plus élevé indépendamment des pesticides. L'équation ci-dessous régresse log(ACHPH) sur les déterminants exogènes plausibles (« première étape »). Un instrument n'est pertinent que s'il est significatif dans cette première étape. L'endogénéité n'est donc pas corrigée ici : les coefficients sont à lire comme des associations et non comme des effets causaux.
+
+```{r endogeneite}
+# Équation de première étape
+m_first_stage <- lm(
+  log_ACHPH ~ log_SUTOT + log_UTANS + log_SUBEX + log_CHREN +
+               log_pression_reg + REGIO_f,
+  data = Rica_commun
+)
+
+tidy(m_first_stage) %>%
+  filter(!grepl("REGIO", term)) %>%
+  mutate(
+    term = recode(term,
+      "(Intercept)"    = "Constante",
+      "log_SUTOT"      = "log(SUTOT) — surface",
+      "log_UTANS"      = "log(UTANS) — travail",
+      "log_SUBEX"      = "log(SUBEX+1) — subventions",
+      "log_CHREN"      = "log(CHREN+1) — engrais",
+      "log_pression_reg" = "log(pression BNV-D régionale)"),
+    Sig. = case_when(p.value < .001 ~ "***", p.value < .01 ~ "**",
+                     p.value < .05 ~ "*", TRUE ~ ""),
+    across(c(estimate, std.error, statistic), ~round(., 4)),
+    p.value = round(p.value, 4)
+  ) %>%
+  rename(Variable = term, Coefficient = estimate,
+         `Err. std.` = std.error, t = statistic, `p-value` = p.value) %>%
+  kable(caption = paste0(
+    "Équation de première étape — Déterminants de log(ACHPH) | R² = ",
+    round(summary(m_first_stage)$r.squared, 3),
+    " (effets région masqués pour lisibilité)")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), font_size = 11)
+```
